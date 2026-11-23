@@ -1,11 +1,12 @@
 
 import os
+import re
 import sqlite3
 from telegram import Update
 from telegram.ext import (
     Application,
-    MessageHandler,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
     filters
 )
@@ -13,8 +14,9 @@ from telegram.ext import (
 TOKEN = os.environ["BOT_TOKEN"]
 
 db = sqlite3.connect("recap.db", check_same_thread=False)
+db.execute("PRAGMA journal_mode=WAL")
 
-db.execute("""
+db.executescript("""
 CREATE TABLE IF NOT EXISTS players (
     chat_id INTEGER,
     user_id INTEGER,
@@ -22,20 +24,54 @@ CREATE TABLE IF NOT EXISTS players (
     side TEXT,
     amount INTEGER,
     PRIMARY KEY (chat_id, user_id, side)
-)
-""")
+);
 
-db.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    chat_id INTEGER,
+    name TEXT,
+    registered INTEGER DEFAULT 0,
+    PRIMARY KEY (chat_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     chat_id INTEGER PRIMARY KEY,
     active INTEGER DEFAULT 0
-)
+);
 """)
 db.commit()
 
 
+def save_profile(chat_id, name, registered=0):
+    name = name.strip()
+    if not name:
+        return
+
+    db.execute("""
+        INSERT INTO profiles (chat_id, name, registered)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chat_id, name)
+        DO UPDATE SET registered =
+            MAX(registered, excluded.registered)
+    """, (chat_id, name, registered))
+    db.commit()
+
+
+def detect_names(chat_id, text):
+    for line in text.splitlines():
+        line = line.strip()
+
+        match = re.fullmatch(
+            r"(.+?)\s+[KB]\s*\d+\s*\.?",
+            line,
+            re.IGNORECASE
+        )
+
+        if match:
+            save_profile(chat_id, match.group(1))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "RECAP BOT AKTIF!\nKetik .cmd untuk melihat perintah."
     )
 
@@ -53,45 +89,68 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("PONG! Bot aktif.")
         return
 
-    if text in (".on", ".akses"):
-        db.execute(
-            "INSERT INTO settings VALUES (?,1) "
-            "ON CONFLICT(chat_id) DO UPDATE SET active=1",
-            (chat_id,)
-        )
+    if text == ".on":
+        db.execute("""
+            INSERT INTO settings VALUES (?, 1)
+            ON CONFLICT(chat_id) DO UPDATE SET active=1
+        """, (chat_id,))
         db.commit()
-        await msg.reply_text("✅ Pencatatan K/B aktif.")
+        await msg.reply_text("✅ Pencatatan aktif.")
         return
 
-    if text in (".off", ".delakses"):
-        db.execute(
-            "INSERT INTO settings VALUES (?,0) "
-            "ON CONFLICT(chat_id) DO UPDATE SET active=0",
-            (chat_id,)
-        )
+    if text == ".off":
+        db.execute("""
+            INSERT INTO settings VALUES (?, 0)
+            ON CONFLICT(chat_id) DO UPDATE SET active=0
+        """, (chat_id,))
         db.commit()
         await msg.reply_text("Pencatatan dimatikan.")
         return
 
+    if text.startswith(".sv "):
+        name = text[4:].strip()
+        if not name:
+            await msg.reply_text("Format: .sv Nama")
+            return
+
+        save_profile(chat_id, name, 1)
+        await msg.reply_text(
+            f"✅ Profil {name} berhasil didaftarkan."
+        )
+        return
+
     if text == ".list":
-        result = ["🎯 RECAP LIST\n"]
+        rows = db.execute("""
+            SELECT name, registered
+            FROM profiles
+            WHERE chat_id=?
+            ORDER BY name
+        """, (chat_id,)).fetchall()
+
+        result = ["📋 DAFTAR PROFIL\n"]
+
+        if rows:
+            for name, registered in rows:
+                result.append(
+                    f"{name} {'P' if registered else '.'}"
+                )
+        else:
+            result.append("Belum ada nama.")
 
         for side in ("K", "B"):
-            result.append(side + ":")
+            result.append(f"\n{side}:")
+            amounts = db.execute("""
+                SELECT name, amount
+                FROM players
+                WHERE chat_id=? AND side=?
+                ORDER BY name
+            """, (chat_id, side)).fetchall()
 
-            rows = db.execute(
-                "SELECT name, amount FROM players "
-                "WHERE chat_id=? AND side=? ORDER BY name",
-                (chat_id, side)
-            ).fetchall()
-
-            if not rows:
-                result.append("- Kosong")
-            else:
-                for name, amount in rows:
+            if amounts:
+                for name, amount in amounts:
                     result.append(f"{name} {amount}")
-
-            result.append("")
+            else:
+                result.append("- Kosong")
 
         await msg.reply_text("\n".join(result))
         return
@@ -100,28 +159,28 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         totals = {}
 
         for side in ("K", "B"):
-            row = db.execute(
-                "SELECT COALESCE(SUM(amount),0) "
-                "FROM players WHERE chat_id=? AND side=?",
-                (chat_id, side)
-            ).fetchone()
+            row = db.execute("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM players
+                WHERE chat_id=? AND side=?
+            """, (chat_id, side)).fetchone()
+
             totals[side] = row[0]
 
-        k = totals["K"]
-        b = totals["B"]
-
         await msg.reply_text(
-            f"📊 REKAP TOTAL\n\n"
-            f"K: {k}\n"
-            f"B: {b}\n"
-            f"Selisih: {abs(k-b)}"
+            "📊 REKAP TOTAL\n\n"
+            f"⭐ K: {totals['K']}\n"
+            f"⭐ B: {totals['B']}\n\n"
+            f"💰 Total: {totals['K'] + totals['B']}"
         )
         return
 
     if text == ".rs":
         db.execute(
-            "DELETE FROM players WHERE chat_id=?",
-            (chat_id,)
+            "DELETE FROM players WHERE chat_id=?", (chat_id,)
+        )
+        db.execute(
+            "DELETE FROM profiles WHERE chat_id=?", (chat_id,)
         )
         db.commit()
         await msg.reply_text("✅ List berhasil direset.")
@@ -133,14 +192,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ".ping - Cek bot\n"
             ".on - Aktifkan pencatatan\n"
             ".off - Matikan pencatatan\n"
-            ".list - Lihat daftar K/B\n"
+            ".sv Nama - Daftarkan profil\n"
+            ".list - Lihat daftar\n"
             ".rk - Rekap total\n"
             ".rs - Reset list\n\n"
-            "Contoh pik:\n"
-            "K 50\n"
-            "B 20"
+            "Format pencatatan:\nK 50\nB 20"
         )
         return
+
+    detect_names(chat_id, text)
 
     active = db.execute(
         "SELECT active FROM settings WHERE chat_id=?",
@@ -151,12 +211,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     parts = text.split()
-
     if len(parts) != 2:
         return
 
     side = parts[0].upper()
-
     if side not in ("K", "B"):
         return
 
@@ -167,7 +225,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return
 
-    name = user.full_name or user.username or str(user.id)
+    name = user.full_name or str(user.id)
 
     db.execute("""
         INSERT INTO players
@@ -175,17 +233,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(chat_id, user_id, side)
         DO UPDATE SET
-        amount=amount+excluded.amount,
-        name=excluded.name
+            amount=amount+excluded.amount,
+            name=excluded.name
     """, (chat_id, user.id, name, side, amount))
 
+    save_profile(chat_id, name)
     db.commit()
 
-    await msg.reply_text(
-        f"✅ Pik: {side} {amount} @{user.username}"
-        if user.username else
-        f"✅ Pik: {side} {amount} {name}"
-    )
+    await msg.reply_text(f"✅ Pik: {side} {amount} {name}")
 
 
 def main():
