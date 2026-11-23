@@ -2,6 +2,7 @@
 import os
 import re
 import sqlite3
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -13,7 +14,14 @@ from telegram.ext import (
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-db = sqlite3.connect("recap.db", check_same_thread=False)
+# DATABASE PERMANEN RAILWAY
+os.makedirs("/app/data", exist_ok=True)
+
+db = sqlite3.connect(
+    "/app/data/recap.db",
+    check_same_thread=False
+)
+
 db.execute("PRAGMA journal_mode=WAL")
 
 db.executescript("""
@@ -38,11 +46,13 @@ CREATE TABLE IF NOT EXISTS settings (
     active INTEGER DEFAULT 0
 );
 """)
+
 db.commit()
 
 
 def save_profile(chat_id, name, registered=0):
     name = name.strip()
+
     if not name:
         return
 
@@ -53,6 +63,7 @@ def save_profile(chat_id, name, registered=0):
         DO UPDATE SET registered =
             MAX(registered, excluded.registered)
     """, (chat_id, name, registered))
+
     db.commit()
 
 
@@ -72,7 +83,8 @@ def detect_names(chat_id, text):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "RECAP BOT AKTIF!\nKetik .cmd untuk melihat perintah."
+        "RECAP BOT AKTIF!\n"
+        "Ketik .cmd untuk melihat perintah."
     )
 
 
@@ -80,6 +92,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user = update.effective_user
     chat_id = update.effective_chat.id
+
     text = (msg.text or "").strip()
 
     if not user:
@@ -94,7 +107,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             INSERT INTO settings VALUES (?, 1)
             ON CONFLICT(chat_id) DO UPDATE SET active=1
         """, (chat_id,))
+
         db.commit()
+
         await msg.reply_text("✅ Pencatatan aktif.")
         return
 
@@ -103,17 +118,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             INSERT INTO settings VALUES (?, 0)
             ON CONFLICT(chat_id) DO UPDATE SET active=0
         """, (chat_id,))
+
         db.commit()
+
         await msg.reply_text("Pencatatan dimatikan.")
         return
 
     if text.startswith(".sv "):
         name = text[4:].strip()
+
         if not name:
             await msg.reply_text("Format: .sv Nama")
             return
 
         save_profile(chat_id, name, 1)
+
         await msg.reply_text(
             f"✅ Profil {name} berhasil didaftarkan."
         )
@@ -139,6 +158,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for side in ("K", "B"):
             result.append(f"\n{side}:")
+
             amounts = db.execute("""
                 SELECT name, amount
                 FROM players
@@ -177,12 +197,17 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == ".rs":
         db.execute(
-            "DELETE FROM players WHERE chat_id=?", (chat_id,)
+            "DELETE FROM players WHERE chat_id=?",
+            (chat_id,)
         )
+
         db.execute(
-            "DELETE FROM profiles WHERE chat_id=?", (chat_id,)
+            "DELETE FROM profiles WHERE chat_id=?",
+            (chat_id,)
         )
+
         db.commit()
+
         await msg.reply_text("✅ List berhasil direset.")
         return
 
@@ -196,7 +221,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ".list - Lihat daftar\n"
             ".rk - Rekap total\n"
             ".rs - Reset list\n\n"
-            "Format pencatatan:\nK 50\nB 20"
+            "Format pencatatan:\n"
+            "K 50\n"
+            "B 20"
         )
         return
 
@@ -211,17 +238,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     parts = text.split()
+
     if len(parts) != 2:
         return
 
     side = parts[0].upper()
+
     if side not in ("K", "B"):
         return
 
     try:
         amount = int(parts[1])
+
         if amount <= 0:
             return
+
     except ValueError:
         return
 
@@ -238,20 +269,30 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (chat_id, user.id, name, side, amount))
 
     save_profile(chat_id, name)
+
     db.commit()
 
-    await msg.reply_text(f"✅ Pik: {side} {amount} {name}")
+    await msg.reply_text(
+        f"✅ Pik: {side} {amount} {name}"
+    )
 
 
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle)
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle
+        )
     )
 
     print("RECAP BOT BERJALAN!")
+
     app.run_polling()
 
 
